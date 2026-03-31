@@ -7,14 +7,12 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "5173:5173" # Vite default port mapped to host
+      - "3000:5173" # Map Vite port to 3000 on host
     volumes:
-      # Sync source code changes to the container (live reload)
       - ./frontend:/app
-      # Exclude node_modules so docker manages its own dependencies 
       - /app/node_modules
     environment:
-      - CHOKIDAR_USEPOLLING=true # Helps with file watching in Docker
+      - CHOKIDAR_USEPOLLING=true
 
   # --- Microservices (Go API) ---
   user-service:
@@ -39,12 +37,14 @@ services:
     environment:
       - PORT=8082
       - PAXOS_NODES=paxos-node-1:9001,paxos-node-2:9002,paxos-node-3:9003
+      - MARKET_ADDR=http://market-data:8083
     volumes:
       - ./backend:/app
     depends_on:
       - paxos-node-1
       - paxos-node-2
       - paxos-node-3
+      - market-data
 
   market-data:
     build:
@@ -67,7 +67,7 @@ services:
     environment:
       - NODE_ID=1
       - PORT=9001
-      - PEERS=paxos-node-2:9002,paxos-node-3:9003
+      - PEERS=2=paxos-node-2:9002,3=paxos-node-3:9003
     volumes:
       - ./backend:/app
 
@@ -79,7 +79,7 @@ services:
     environment:
       - NODE_ID=2
       - PORT=9002
-      - PEERS=paxos-node-1:9001,paxos-node-3:9003
+      - PEERS=1=paxos-node-1:9001,3=paxos-node-3:9003
     volumes:
       - ./backend:/app
 
@@ -91,6 +91,6 @@ services:
     environment:
       - NODE_ID=3
       - PORT=9003
-      - PEERS=paxos-node-1:9001,paxos-node-2:9002
+      - PEERS=1=paxos-node-1:9001,2=paxos-node-2:9002
     volumes:
       - ./backend:/app

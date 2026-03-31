@@ -37,16 +37,28 @@ func main() {
 	// LRU cache for trade history (100 trades)
 	lru = cache.NewLRUCache(100)
 
-	http.HandleFunc("/ws", handleWebSocket)
-	http.HandleFunc("/api/market/history", handleHistory)
-	http.HandleFunc("/api/market/broadcast", handleBroadcast) // Internal endpoint to receive updates
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", handleWebSocket)
+	mux.HandleFunc("/api/market/history", handleHistory)
+	mux.HandleFunc("/api/market/broadcast", handleBroadcast) // Internal endpoint to receive updates
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK")
 	})
 
+	corsMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+
 	log.Printf("Market Data Service listening on port %s", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Fatal(http.ListenAndServe(":"+port, corsMux))
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {

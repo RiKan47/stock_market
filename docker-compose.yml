@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  # --- Frontend Application ---
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173" # Vite default port mapped to host
+    volumes:
+      # Sync source code changes to the container (live reload)
+      - ./frontend:/app
+      # Exclude node_modules so docker manages its own dependencies 
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true # Helps with file watching in Docker
+
+  # --- Microservices (Go API) ---
+  user-service:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["go", "run", "cmd/user_service/main.go"]
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+    volumes:
+      - ./backend:/app
+
+  matching-engine:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["go", "run", "cmd/matching_engine/main.go"]
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - PAXOS_NODES=paxos-node-1:9001,paxos-node-2:9002,paxos-node-3:9003
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - paxos-node-1
+      - paxos-node-2
+      - paxos-node-3
+
+  market-data:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["go", "run", "cmd/market_data/main.go"]
+    ports:
+      - "8083:8083"
+    environment:
+      - PORT=8083
+    volumes:
+      - ./backend:/app
+
+  # --- Distributed Consensus Cluster (Paxos) ---
+  paxos-node-1:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["go", "run", "cmd/paxos_node/main.go"]
+    environment:
+      - NODE_ID=1
+      - PORT=9001
+      - PEERS=paxos-node-2:9002,paxos-node-3:9003
+    volumes:
+      - ./backend:/app
+
+  paxos-node-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["go", "run", "cmd/paxos_node/main.go"]
+    environment:
+      - NODE_ID=2
+      - PORT=9002
+      - PEERS=paxos-node-1:9001,paxos-node-3:9003
+    volumes:
+      - ./backend:/app
+
+  paxos-node-3:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["go", "run", "cmd/paxos_node/main.go"]
+    environment:
+      - NODE_ID=3
+      - PORT=9003
+      - PEERS=paxos-node-1:9001,paxos-node-2:9002
+    volumes:
+      - ./backend:/app

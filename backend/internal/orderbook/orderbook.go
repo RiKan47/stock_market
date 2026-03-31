@@ -3,6 +3,7 @@ package orderbook
 import (
 	"container/heap"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -35,13 +36,13 @@ func NewOrderBook(symbol string) *OrderBook {
 func (ob *OrderBook) AddOrder(order *models.Order) []models.Trade {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
-	
+
 	// Add to map for quick lookup
 	ob.orderMap[order.ID] = order
-	
+
 	// Try to match immediately
 	trades := ob.matchOrder(order)
-	
+
 	// If not fully filled, add to appropriate heap
 	if order.Remaining > 0 {
 		if order.Side == models.OrderSideBuy {
@@ -50,16 +51,16 @@ func (ob *OrderBook) AddOrder(order *models.Order) []models.Trade {
 			heap.Push(&ob.asks.OrderHeap, order)
 		}
 	}
-	
+
 	return trades
 }
 
 // matchOrder attempts to match an incoming order against the opposite side
 func (ob *OrderBook) matchOrder(order *models.Order) []models.Trade {
 	trades := make([]models.Trade, 0)
-	
+
 	remaining := order.Remaining
-	
+
 	if order.Side == models.OrderSideBuy {
 		// Match against asks (sell orders)
 		for remaining > 0 && ob.asks.Len() > 0 {
@@ -68,12 +69,12 @@ func (ob *OrderBook) matchOrder(order *models.Order) []models.Trade {
 				break
 			}
 			oppositeOrder := opposite.(*models.Order)
-			
+
 			// For limit orders, check price condition
 			if order.Type == models.OrderTypeLimit && order.Price < oppositeOrder.Price {
 				break // Can't match at this price
 			}
-			
+
 			// Determine execution price and quantity
 			execPrice := oppositeOrder.Price
 			if order.Type == models.OrderTypeMarket {
@@ -83,29 +84,29 @@ func (ob *OrderBook) matchOrder(order *models.Order) []models.Trade {
 				// Limit buy can match if price >= ask
 				execPrice = oppositeOrder.Price
 			}
-			
+
 			execQuantity := min(remaining, oppositeOrder.Remaining)
-			
+
 			// Create trade
 			trade := models.Trade{
-				ID:         generateID(),
-				Symbol:     ob.symbol,
-				Price:      execPrice,
-				Quantity:   execQuantity,
-				BuyOrderID: order.ID,
+				ID:          generateID(),
+				Symbol:      ob.symbol,
+				Price:       execPrice,
+				Quantity:    execQuantity,
+				BuyOrderID:  order.ID,
 				SellOrderID: oppositeOrder.ID,
-				Timestamp:  time.Now(),
+				Timestamp:   time.Now(),
 			}
 			trades = append(trades, trade)
 			ob.trades = append(ob.trades, trade)
-			
+
 			// Update order quantities
 			remaining -= execQuantity
 			order.Remaining -= execQuantity
 			oppositeOrder.Remaining -= execQuantity
-			
+
 			ob.lastPrice = execPrice
-			
+
 			// If opposite order is filled, remove from heap
 			if oppositeOrder.Remaining == 0 {
 				heap.Pop(&ob.asks.OrderHeap)
@@ -114,7 +115,7 @@ func (ob *OrderBook) matchOrder(order *models.Order) []models.Trade {
 			} else {
 				oppositeOrder.Status = models.OrderStatusPartially
 			}
-			
+
 			// Update order status
 			if order.Remaining == 0 {
 				order.Status = models.OrderStatusFilled
@@ -131,39 +132,39 @@ func (ob *OrderBook) matchOrder(order *models.Order) []models.Trade {
 				break
 			}
 			oppositeOrder := opposite.(*models.Order)
-			
+
 			// For limit orders, check price condition
 			if order.Type == models.OrderTypeLimit && order.Price > oppositeOrder.Price {
 				break
 			}
-			
+
 			execPrice := oppositeOrder.Price
 			if order.Type == models.OrderTypeMarket {
 				execPrice = oppositeOrder.Price
 			} else if order.Price <= oppositeOrder.Price {
 				execPrice = oppositeOrder.Price
 			}
-			
+
 			execQuantity := min(remaining, oppositeOrder.Remaining)
-			
+
 			trade := models.Trade{
-				ID:         generateID(),
-				Symbol:     ob.symbol,
-				Price:      execPrice,
-				Quantity:   execQuantity,
-				BuyOrderID: oppositeOrder.ID,
+				ID:          generateID(),
+				Symbol:      ob.symbol,
+				Price:       execPrice,
+				Quantity:    execQuantity,
+				BuyOrderID:  oppositeOrder.ID,
 				SellOrderID: order.ID,
-				Timestamp:  time.Now(),
+				Timestamp:   time.Now(),
 			}
 			trades = append(trades, trade)
 			ob.trades = append(ob.trades, trade)
-			
+
 			remaining -= execQuantity
 			order.Remaining -= execQuantity
 			oppositeOrder.Remaining -= execQuantity
-			
+
 			ob.lastPrice = execPrice
-			
+
 			if oppositeOrder.Remaining == 0 {
 				heap.Pop(&ob.bids.OrderHeap)
 				delete(ob.orderMap, oppositeOrder.ID)
@@ -171,7 +172,7 @@ func (ob *OrderBook) matchOrder(order *models.Order) []models.Trade {
 			} else {
 				oppositeOrder.Status = models.OrderStatusPartially
 			}
-			
+
 			if order.Remaining == 0 {
 				order.Status = models.OrderStatusFilled
 				break
@@ -180,7 +181,7 @@ func (ob *OrderBook) matchOrder(order *models.Order) []models.Trade {
 			}
 		}
 	}
-	
+
 	order.Remaining = remaining
 	return trades
 }
@@ -189,12 +190,12 @@ func (ob *OrderBook) matchOrder(order *models.Order) []models.Trade {
 func (ob *OrderBook) CancelOrder(orderID string) bool {
 	ob.mu.Lock()
 	defer ob.mu.Unlock()
-	
+
 	order, exists := ob.orderMap[orderID]
 	if !exists {
 		return false
 	}
-	
+
 	// Remove from heap
 	if order.Side == models.OrderSideBuy {
 		for i, o := range ob.bids.OrderHeap {
@@ -211,7 +212,7 @@ func (ob *OrderBook) CancelOrder(orderID string) bool {
 			}
 		}
 	}
-	
+
 	// Update order status
 	order.Status = models.OrderStatusCancelled
 	delete(ob.orderMap, orderID)
@@ -222,20 +223,38 @@ func (ob *OrderBook) CancelOrder(orderID string) bool {
 func (ob *OrderBook) GetDepth(levels int) ([]models.Order, []models.Order) {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
-	
-	// Copy bids (highest prices first)
-	bids := make([]models.Order, 0, min(levels, ob.bids.Len()))
-	for i := 0; i < min(levels, ob.bids.Len()); i++ {
-		bids = append(bids, *ob.bids.OrderHeap[i])
+
+	// Copy all bids and sort them (highest price first)
+	bidsCount := ob.bids.Len()
+	allBids := make([]models.Order, 0, bidsCount)
+	for i := 0; i < bidsCount; i++ {
+		allBids = append(allBids, *ob.bids.OrderHeap[i])
 	}
-	
-	// Copy asks (lowest prices first)
-	asks := make([]models.Order, 0, min(levels, ob.asks.Len()))
-	for i := 0; i < min(levels, ob.asks.Len()); i++ {
-		asks = append(asks, *ob.asks.OrderHeap[i])
+	sort.Slice(allBids, func(i, j int) bool {
+		if allBids[i].Price == allBids[j].Price {
+			return allBids[i].CreatedAt.Before(allBids[j].CreatedAt)
+		}
+		return allBids[i].Price > allBids[j].Price
+	})
+
+	// Copy all asks and sort them (lowest price first)
+	asksCount := ob.asks.Len()
+	allAsks := make([]models.Order, 0, asksCount)
+	for i := 0; i < asksCount; i++ {
+		allAsks = append(allAsks, *ob.asks.OrderHeap[i])
 	}
-	
-	return bids, asks
+	sort.Slice(allAsks, func(i, j int) bool {
+		if allAsks[i].Price == allAsks[j].Price {
+			return allAsks[i].CreatedAt.Before(allAsks[j].CreatedAt)
+		}
+		return allAsks[i].Price < allAsks[j].Price
+	})
+
+	// Take only the requested number of levels
+	limitBids := min(levels, len(allBids))
+	limitAsks := min(levels, len(allAsks))
+
+	return allBids[:limitBids], allAsks[:limitAsks]
 }
 
 // GetLastPrice returns the last traded price

@@ -7,11 +7,15 @@ import (
 )
 
 func TestPaxosConsensus(t *testing.T) {
-	// Setup 3 nodes
-	nodeIDs := []int{1, 2, 3}
+	// Setup 3 nodes (simulated with empty addresses for local logic test)
+	nodeAddresses := map[int]string{
+		1: "localhost:9001",
+		2: "localhost:9002",
+		3: "localhost:9003",
+	}
 	nodes := make(map[int]*Node)
-	for _, id := range nodeIDs {
-		nodes[id] = NewNode(id, nodeIDs)
+	for id := range nodeAddresses {
+		nodes[id] = NewNode(id, nodeAddresses)
 	}
 
 	trade := &models.Trade{

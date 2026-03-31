@@ -1,6 +1,10 @@
 package paxos
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"stock-market/pkg/models"
 	"sync"
 )
@@ -28,7 +32,7 @@ type PaxosState struct {
 // Node represents a single participant in the Paxos cluster
 type Node struct {
 	ID     int
-	Nodes  []int // IDs of all nodes in cluster
+	Nodes  map[int]string // Map of NodeID to "host:port"
 	Quorum int
 
 	// Persistent state for different consensus instances (indexed by InstanceID)
@@ -39,11 +43,11 @@ type Node struct {
 	mu sync.RWMutex
 }
 
-func NewNode(id int, nodeIDs []int) *Node {
+func NewNode(id int, nodeAddresses map[int]string) *Node {
 	return &Node{
 		ID:        id,
-		Nodes:     nodeIDs,
-		Quorum:    (len(nodeIDs) / 2) + 1,
+		Nodes:     nodeAddresses,
+		Quorum:    (len(nodeAddresses) / 2) + 1,
 		Instances: make(map[string]*PaxosState),
 		Log:       make([]*models.Trade, 0),
 	}
@@ -136,9 +140,101 @@ func (n *Node) Commit(instanceID string, value *models.Trade) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	// In a real Paxos, we would ensure gaps in the log are filled
-	// Here we just append the committed trade to the local log
 	n.Log = append(n.Log, value)
-	// Clean up instance state once committed
 	delete(n.Instances, instanceID)
+}
+
+// Propose orchestrates the Paxos phases across the network
+func (n *Node) Propose(instanceID string, value *models.Trade) bool {
+	n.mu.Lock()
+	state, ok := n.Instances[instanceID]
+	if !ok {
+		state = &PaxosState{}
+		n.Instances[instanceID] = state
+	}
+	state.PromisedNumber.Round++
+	state.PromisedNumber.NodeID = n.ID
+	propNum := state.PromisedNumber
+	n.mu.Unlock()
+
+	// Phase 1: Prepare
+	promises := 0
+	var highestAcceptedVal *models.Trade
+	var highestAcceptedNum ProposalNumber
+
+	for _, addr := range n.Nodes {
+		resp, err := n.sendPrepare(addr, PrepareRequest{instanceID, propNum})
+		if err == nil && resp.Promised {
+			promises++
+			if resp.LastAcceptedV != nil && resp.LastAcceptedN.GreaterThan(highestAcceptedNum) {
+				highestAcceptedNum = resp.LastAcceptedN
+				highestAcceptedVal = resp.LastAcceptedV
+			}
+		}
+	}
+
+	if promises < n.Quorum {
+		return false
+	}
+
+	valToPropose := value
+	if highestAcceptedVal != nil {
+		valToPropose = highestAcceptedVal
+	}
+
+	// Phase 2: Accept
+	accepts := 0
+	for _, addr := range n.Nodes {
+		resp, err := n.sendAccept(addr, AcceptRequest{instanceID, propNum, valToPropose})
+		if err == nil && resp.Accepted {
+			accepts++
+		}
+	}
+
+	if accepts < n.Quorum {
+		return false
+	}
+
+	// Phase 3: Commit
+	for _, addr := range n.Nodes {
+		n.sendCommit(addr, instanceID, valToPropose)
+	}
+
+	return true
+}
+
+func (n *Node) sendPrepare(addr string, req PrepareRequest) (PromiseResponse, error) {
+	url := fmt.Sprintf("http://%s/paxos/prepare", addr)
+	body, _ := json.Marshal(req)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return PromiseResponse{}, err
+	}
+	defer resp.Body.Close()
+	var promise PromiseResponse
+	json.NewDecoder(resp.Body).Decode(&promise)
+	return promise, nil
+}
+
+func (n *Node) sendAccept(addr string, req AcceptRequest) (AcceptResponse, error) {
+	url := fmt.Sprintf("http://%s/paxos/accept", addr)
+	body, _ := json.Marshal(req)
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return AcceptResponse{}, err
+	}
+	defer resp.Body.Close()
+	var accept AcceptResponse
+	json.NewDecoder(resp.Body).Decode(&accept)
+	return accept, nil
+}
+
+func (n *Node) sendCommit(addr string, instanceID string, val *models.Trade) {
+	url := fmt.Sprintf("http://%s/paxos/commit", addr)
+	req := struct {
+		InstanceID string        `json:"instance_id"`
+		Value      *models.Trade `json:"value"`
+	}{instanceID, val}
+	body, _ := json.Marshal(req)
+	http.Post(url, "application/json", bytes.NewBuffer(body))
 }
